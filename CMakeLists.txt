@@ -36,6 +36,7 @@ find_package(yaml-cpp REQUIRED)
 if(NOT TARGET yaml-cpp::yaml-cpp AND TARGET yaml-cpp)
   add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
 endif()
+find_package(Threads REQUIRED)
 
 # -----------------------------
 # Create static library
@@ -59,7 +60,8 @@ endif()
 target_link_libraries(
   openarm_teleop_lib
   PUBLIC OpenArmCAN::openarm_can Eigen3::Eigen ${orocos_kdl_LIBRARIES}
-         kdl_parser::kdl_parser urdfdom::urdfdom_model yaml-cpp::yaml-cpp)
+         kdl_parser::kdl_parser urdfdom::urdfdom_model yaml-cpp::yaml-cpp
+         Threads::Threads)
 
 # -----------------------------
 # Executables

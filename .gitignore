@@ -19,3 +19,13 @@ ament_cmake_core/
 build.ninja
 cmake_install.cmake
 CMakeFiles/
+
+# pixi
+.pixi/
+
+# vendored ROS 2 workspace (managed by `pixi run setup-ws`)
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+ros2_ws/src/openarm_description/
+ros2_ws/src/openarm_can/

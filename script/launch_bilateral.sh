@@ -49,10 +49,11 @@ fi
 LEADER_URDF_PATH="$TMPDIR/${ARM_TYPE}_leader.urdf"
 FOLLOWER_URDF_PATH="$TMPDIR/${ARM_TYPE}_follower.urdf"
 XACRO_FILE="$ARM_TYPE.urdf.xacro"
-WS_DIR=~/openarm_ros2_ws
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+WS_DIR="${WS_DIR:-$REPO_DIR/ros2_ws}"
 XACRO_PATH="$WS_DIR/src/openarm_description/urdf/robot/$XACRO_FILE"
-BIN_PATH=~/openarm_teleop_tmp/build/bilateral_control
-echo $BIN_PATH
+BIN_PATH="$REPO_DIR/build/bilateral_control"
 # ================================
 # Check workspace
 if [ ! -d "$WS_DIR" ]; then

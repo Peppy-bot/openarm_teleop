@@ -1,0 +1,80 @@
+[workspace]
+name = "openarm_teleop"
+description = "ROS 2 Humble + build environment for the OpenArm teleop binaries"
+channels = [
+    "https://prefix.dev/robostack-staging",
+    "conda-forge",
+]
+platforms = ["linux-aarch64"]
+
+[dependencies]
+# ROS 2 Humble (minimal)
+ros-humble-ros-base = "*"
+ros-humble-xacro = "*"
+
+# Link-time deps for openarm_teleop (see CMakeLists.txt find_package list)
+ros-humble-kdl-parser = "*"
+ros-humble-orocos-kdl-vendor = "*"
+ros-humble-urdf = "*"
+ros-humble-urdfdom-headers = "*"
+
+# colcon-buildable workspace tooling
+ros-humble-ament-cmake-auto = "*"
+colcon-common-extensions = "*"
+
+# Build tooling
+cmake = "*"
+ninja = "*"
+compilers = "*"
+pkg-config = "*"
+git = "*"
+
+# Direct find_package targets
+eigen = "*"
+yaml-cpp = "*"
+urdfdom = "*"
+
+[activation]
+# Make the colcon overlay available to every `pixi run` / `pixi shell` invocation
+# once the workspace has been built. Silently skipped before `setup-ws` runs.
+scripts = ["activate.sh"]
+
+[tasks.setup-ws]
+description = "Clone openarm_description + openarm_can into ros2_ws/src and colcon-build them"
+cmd = "bash scripts/pixi/setup_ws.sh"
+# Skip if the colcon overlay is already built. Delete ros2_ws/install to force a redo.
+inputs = ["scripts/pixi/setup_ws.sh"]
+outputs = ["ros2_ws/install/setup.bash"]
+
+[tasks.build]
+description = "Configure and build openarm_teleop into ./build/"
+cmd = "bash scripts/pixi/build.sh"
+depends-on = ["setup-ws"]
+# Re-build only when CMake config or sources change.
+inputs = [
+    "CMakeLists.txt",
+    "src/**",
+    "control/**",
+    "scripts/pixi/build.sh",
+]
+outputs = [
+    "build/unilateral_control",
+    "build/bilateral_control",
+    "build/gravity_comp",
+    "build/comm_test",
+]
+
+[tasks.teleop-unilateral]
+description = "Run the unilateral teleop launch script (args: <arm_side> [leader_can] [follower_can])"
+cmd = "bash script/launch_unilateral.sh"
+depends-on = ["build"]
+
+[tasks.teleop-bilateral]
+description = "Run the bilateral teleop launch script"
+cmd = "bash script/launch_bilateral.sh"
+depends-on = ["build"]
+
+[tasks.teleop-grav-comp]
+description = "Run the gravity-compensation launch script"
+cmd = "bash script/launch_grav_comp.sh"
+depends-on = ["build"]
