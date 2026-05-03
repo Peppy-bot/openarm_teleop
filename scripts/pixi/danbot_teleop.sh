@@ -33,15 +33,31 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
+# Stable interface names, set up by scripts/pixi/openarm_can_setup.sh
+# (called from the openarm-can.service systemd unit at boot).
+RIGHT_LEADER="right_leader"
+RIGHT_FOLLOWER="right_follower"
+LEFT_LEADER="left_leader"
+LEFT_FOLLOWER="left_follower"
+
+for iface in "$RIGHT_LEADER" "$RIGHT_FOLLOWER" "$LEFT_LEADER" "$LEFT_FOLLOWER"; do
+    if ! ip link show "$iface" >/dev/null 2>&1; then
+        echo "[danbot-teleop] interface '$iface' not found" >&2
+        echo "  Did the openarm-can.service run? Check: systemctl status openarm-can.service" >&2
+        echo "  Or run manually: sudo bash $REPO_DIR/scripts/pixi/openarm_can_setup.sh" >&2
+        exit 1
+    fi
+done
+
 # `setsid` puts each launch in its own process group, so on shutdown we can
 # signal the whole tree (script + xacro + binary) by PGID.
-setsid bash "$REPO_DIR/script/launch_unilateral.sh" right_arm can4 can6 &
+setsid bash "$REPO_DIR/script/launch_unilateral.sh" right_arm "$RIGHT_LEADER" "$RIGHT_FOLLOWER" &
 PGIDS+=($!)
 
 # Stagger by 2 s to avoid the two scripts racing on /tmp/openarm_urdf_gen/.
 sleep 2
 
-setsid bash "$REPO_DIR/script/launch_unilateral.sh" left_arm can5 can7 &
+setsid bash "$REPO_DIR/script/launch_unilateral.sh" left_arm "$LEFT_LEADER" "$LEFT_FOLLOWER" &
 PGIDS+=($!)
 
 wait

@@ -15,35 +15,69 @@ Prereqs: [pixi](https://pixi.sh), `linux-aarch64` host (Jetson/Orin). Add more p
 
 ## DanBot — what this rig is
 
-This checkout drives **DanBot** — our local OpenArm rig, hosted on a Jetson AGX Orin with two PEAK PCAN-USB Pro FD adapters (4 CAN-FD channels: `can4..can7`).
+This checkout drives **DanBot** — our local OpenArm rig, hosted on a Jetson AGX Orin with two PEAK PCAN-USB Pro FD adapters (4 CAN-FD channels).
 
-CAN mapping (used by `pixi run danbot-teleop`):
+The four channels are renamed at boot to **stable, role-based names** (driven by `scripts/pixi/openarm_can_setup.sh`, see "Boot-time setup" below):
 
-| Arm   | Leader | Follower |
-| ----- | ------ | -------- |
-| right | `can4` | `can6`   |
-| left  | `can5` | `can7`   |
+| Arm   | Leader         | Follower         |
+| ----- | -------------- | ---------------- |
+| right | `right_leader` | `right_follower` |
+| left  | `left_leader`  | `left_follower`  |
 
-Leaders share PCAN adapter #1 (`can4`/`can5`), followers share PCAN adapter #2 (`can6`/`can7`). The Jetson's on-SoC mttcan ports (`can0..can3`) are **not** wired to the arms on this rig — don't use them.
+(No `can_` prefix because Linux interface names are capped at 15 characters — `can_right_follower` doesn't fit. `ip link show` already labels them `link/can`, so the prefix is redundant.)
 
-To drive a single arm (e.g. when one side is unplugged):
-
-```bash
-pixi run teleop-unilateral right_arm can4 can6
-pixi run teleop-unilateral left_arm  can5 can7
-```
-
-### One-time setup on a fresh boot
-
-The Jetson L4T kernel doesn't ship the PEAK driver, so `pcan` is built from source (already done — see `/tmp/peak-linux-driver-9.0/` or rebuild from <https://www.peak-system.com/quick/PCAN-Linux-Driver>). To make it survive reboots:
+Leaders are on PCAN adapter #1 (Jetson USB port `1-4.1`), followers on PCAN adapter #2 (port `1-4.2`). The Jetson's on-SoC mttcan ports are **not** wired to the arms — don't use them.
 
 ```bash
-echo pcan | sudo tee /etc/modules-load.d/pcan.conf
+pixi run danbot-teleop                                            # both arms
+pixi run teleop-unilateral right_arm right_leader right_follower  # right only
+pixi run teleop-unilateral left_arm  left_leader  left_follower   # left only
 ```
 
-And to auto-configure all four PEAK CAN-FD buses on boot, install a oneshot systemd unit that runs `openarm-can-configure-socketcan canN -fd` for `N=4..7`.
+### Boot-time setup
 
-If you ever see `tx N rx 0` / ERROR-PASSIVE / BUS-OFF on the PEAK buses again, the most likely culprit is a stray teleop process holding the socket open after a previous run — `pkill -9 -f unilateral_control` (and the other binaries) clears it.
+Two pieces:
+
+1. **`pcan` kernel module auto-load.** The Jetson L4T kernel doesn't ship the PEAK driver, so it's built from source (rebuild from <https://www.peak-system.com/quick/PCAN-Linux-Driver> with `make netdev && sudo make install`). To make it load on boot:
+   ```bash
+   echo pcan | sudo tee /etc/modules-load.d/pcan.conf
+   ```
+
+2. **CAN interface rename + bring-up.** A systemd oneshot unit calls `scripts/pixi/openarm_can_setup.sh` after the network stack is up. The script reads `/sys/class/pcan/pcanusbfd*/` to map each channel to the right stable name (by USB port path + controller channel), renames it via `ip link set canN name <role>`, then brings it up in CAN-FD mode.
+
+   ```bash
+   sudo tee /etc/systemd/system/openarm-can.service >/dev/null <<EOF
+   [Unit]
+   Description=Rename and configure DanBot PEAK CAN-FD interfaces
+   After=network-pre.target
+   Wants=network-pre.target
+   DefaultDependencies=no
+
+   [Service]
+   Type=oneshot
+   RemainAfterExit=yes
+   ExecStart=/bin/bash $(pwd)/scripts/pixi/openarm_can_setup.sh
+
+   [Install]
+   WantedBy=multi-user.target
+   EOF
+
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now openarm-can.service
+   ```
+
+   To re-run manually (after replugging adapters or editing the mapping):
+   ```bash
+   sudo bash scripts/pixi/openarm_can_setup.sh
+   ```
+
+   The mapping table is at the top of the script — adjust if you re-cable.
+
+### Troubleshooting
+
+- **`pixi run danbot-teleop` says `interface 'right_leader' not found`** → the rename didn't run. Check `systemctl status openarm-can.service`, then `sudo bash scripts/pixi/openarm_can_setup.sh` to do it now.
+- **Diagnosis tool returns NG on every motor** → motors aren't electrically alive. Most likely an e-stop re-latched after a power cycle (they reset on boot and need to be physically released again). Confirm joint status LEDs are lit on every motor and all four e-stops are popped up, then `~/openarm_can/build/openarm-can-diagnosis right_leader -fd` to re-test.
+- **`tx N rx 0` / ERROR-PASSIVE / BUS-OFF on a bus that was previously fine** → most often a stray teleop process holding the socket open from a previous run: `pkill -9 -f unilateral_control` (and the other binaries) clears it. Then re-cycle the bus: `sudo ip link set <name> down && sudo openarm-can-configure-socketcan <name> -fd`.
 
 ## All pixi tasks
 
