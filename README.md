@@ -38,24 +38,34 @@ pixi run teleop-unilateral left_arm  left_leader  left_follower   # left only
 
 Two pieces:
 
-1. **`pcan` kernel module auto-load.** The Jetson L4T kernel doesn't ship the PEAK driver, so it's built from source (rebuild from <https://www.peak-system.com/quick/PCAN-Linux-Driver> with `make netdev && sudo make install`). To make it load on boot:
+1. **`pcan` kernel module — load on USB device appearance, not at boot.** The Jetson L4T kernel doesn't ship the PEAK driver, so it's built from source (rebuild from <https://www.peak-system.com/quick/PCAN-Linux-Driver> with `make netdev && sudo make install`).
+
+   Don't add it to `/etc/modules-load.d/` — `pcan_init_module()` does synchronous USB I/O at modprobe time (calls `pcan_usb_plugin → canfd_set_bus_off → pcan_usbfd_send_ucan_cmd`), so loading it before USB has fully enumerated can race and hang `systemd-modules-load.service`, which then blocks the rest of boot. Use a udev rule instead — modprobe only runs after the USB device is visible:
+
    ```bash
-   echo pcan | sudo tee /etc/modules-load.d/pcan.conf
+   sudo rm -f /etc/modules-load.d/pcan.conf
+
+   sudo tee /etc/udev/rules.d/70-pcan-modprobe.rules >/dev/null <<'EOF'
+   # PEAK PCAN-USB Pro FD (0c72:0011) — load pcan after the USB device is enumerated
+   ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="0c72", ATTRS{idProduct}=="0011", RUN+="/sbin/modprobe pcan"
+   EOF
+
+   sudo udevadm control --reload-rules
    ```
 
-2. **CAN interface rename + bring-up.** A systemd oneshot unit calls `scripts/pixi/openarm_can_setup.sh` after the network stack is up. The script reads `/sys/class/pcan/pcanusbfd*/` to map each channel to the right stable name (by USB port path + controller channel), renames it via `ip link set canN name <role>`, then brings it up in CAN-FD mode.
+2. **CAN interface rename + bring-up.** A systemd oneshot unit calls `scripts/pixi/openarm_can_setup.sh` at multi-user.target. The script polls `/sys/class/pcan/pcanusbfd*/` for up to 30 s (giving the udev-triggered modprobe time to land), maps each channel to its stable name by USB port path + controller channel, renames `canN` via `ip link set canN name <role>`, then brings it up in CAN-FD mode.
 
    ```bash
    sudo tee /etc/systemd/system/openarm-can.service >/dev/null <<EOF
    [Unit]
    Description=Rename and configure DanBot PEAK CAN-FD interfaces
-   After=network-pre.target
-   Wants=network-pre.target
-   DefaultDependencies=no
+   After=local-fs.target
 
    [Service]
    Type=oneshot
    RemainAfterExit=yes
+   # Script polls for /sys/class/pcan/pcanusbfd* up to 30s — give it room.
+   TimeoutStartSec=60
    ExecStart=/bin/bash $(pwd)/scripts/pixi/openarm_can_setup.sh
 
    [Install]
@@ -76,6 +86,7 @@ Two pieces:
 ### Troubleshooting
 
 - **`pixi run danbot-teleop` says `interface 'right_leader' not found`** → the rename didn't run. Check `systemctl status openarm-can.service`, then `sudo bash scripts/pixi/openarm_can_setup.sh` to do it now.
+- **Boot got stuck for a long time / `systemctl status openarm-can.service` shows the prior boot had no entries** → almost certainly the pcan-loading-too-early race. Verify `/etc/modules-load.d/pcan.conf` is *gone* and `/etc/udev/rules.d/70-pcan-modprobe.rules` is in place per step 1 above. Also check that pcan does actually load: `lsusb | grep -i peak` after boot, then `lsmod | grep pcan` should be non-empty within ~5 s.
 - **Diagnosis tool returns NG on every motor** → motors aren't electrically alive. Most likely an e-stop re-latched after a power cycle (they reset on boot and need to be physically released again). Confirm joint status LEDs are lit on every motor and all four e-stops are popped up, then `~/openarm_can/build/openarm-can-diagnosis right_leader -fd` to re-test.
 - **`tx N rx 0` / ERROR-PASSIVE / BUS-OFF on a bus that was previously fine** → most often a stray teleop process holding the socket open from a previous run: `pkill -9 -f unilateral_control` (and the other binaries) clears it. Then re-cycle the bus: `sudo ip link set <name> down && sudo openarm-can-configure-socketcan <name> -fd`.
 

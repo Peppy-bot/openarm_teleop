@@ -22,6 +22,22 @@ declare -A MAPPING=(
 
 CONFIGURE_TOOL="${CONFIGURE_TOOL:-/usr/local/bin/openarm-can-configure-socketcan}"
 
+# Wait up to N seconds for the pcan module to load and USB enumeration to
+# create /sys/class/pcan/pcanusbfd* entries. At cold boot, the systemd unit
+# can race ahead of either; this gives us a deterministic baseline.
+WAIT_SECS="${WAIT_SECS:-30}"
+for i in $(seq 1 "$WAIT_SECS"); do
+    if compgen -G "/sys/class/pcan/pcanusbfd*" >/dev/null; then
+        break
+    fi
+    if [ "$i" -eq "$WAIT_SECS" ]; then
+        echo "[openarm-can-setup] timed out waiting for /sys/class/pcan/pcanusbfd* (${WAIT_SECS}s)" >&2
+        echo "  Check: lsmod | grep pcan; lsusb | grep -i peak" >&2
+        exit 1
+    fi
+    sleep 1
+done
+
 declare -a stable_names=()
 declare -a unmapped=()
 
