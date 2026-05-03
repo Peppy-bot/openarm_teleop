@@ -78,3 +78,8 @@ depends-on = ["build"]
 description = "Run the gravity-compensation launch script"
 cmd = "bash script/launch_grav_comp.sh"
 depends-on = ["build"]
+
+[tasks.danbot-teleop]
+description = "Launch unilateral teleop for both DanBot arms (right + left). Ctrl-C stops both."
+cmd = "bash scripts/pixi/danbot_teleop.sh"
+depends-on = ["build"]
