@@ -13,10 +13,18 @@ cleanup() {
     EXITING=1
     echo
     echo "[danbot-teleop] stopping both arms..."
+    # Send SIGINT — the unilateral_control binary handles SIGINT (not SIGTERM)
+    # and runs its graceful shutdown path: stop control threads, then
+    # disable_all() on both arms before exiting.
+    for pgid in "${PGIDS[@]}"; do
+        kill -INT -- "-$pgid" 2>/dev/null || true
+    done
+    # Give each arm a few seconds to disable motors cleanly.
+    sleep 3
+    # Anything still alive: escalate.
     for pgid in "${PGIDS[@]}"; do
         kill -TERM -- "-$pgid" 2>/dev/null || true
     done
-    # Give each arm a moment to shut down its motors gracefully.
     sleep 1
     for pgid in "${PGIDS[@]}"; do
         kill -KILL -- "-$pgid" 2>/dev/null || true
