@@ -22,9 +22,23 @@ declare -A MAPPING=(
 
 CONFIGURE_TOOL="${CONFIGURE_TOOL:-/usr/local/bin/openarm-can-configure-socketcan}"
 
-# Wait up to N seconds for the pcan module to load and USB enumeration to
-# create /sys/class/pcan/pcanusbfd* entries. At cold boot, the systemd unit
-# can race ahead of either; this gives us a deterministic baseline.
+# Load pcan ourselves if it's not already loaded. We deliberately do this here
+# (and NOT via /etc/modules-load.d/ or a boot-time udev rule) because pcan's
+# init code has a known kernel bug: it calls usb_bulk_msg from atomic context
+# during pcan_usb_plugin → canfd_set_bus_off, producing
+# "BUG: scheduling while atomic" and stalling for tens of seconds when USB
+# enumeration is slow. Doing the modprobe AFTER multi-user.target (where our
+# systemd unit fires) keeps the stall out of the critical boot path.
+if ! lsmod | grep -q '^pcan '; then
+    echo "[openarm-can-setup] modprobing pcan (this can take 5-30s due to driver bug)"
+    modprobe pcan || {
+        echo "[openarm-can-setup] modprobe pcan failed" >&2
+        exit 1
+    }
+fi
+
+# Wait up to N seconds for the pcan module to register sysfs entries
+# (USB enumeration may still be settling).
 WAIT_SECS="${WAIT_SECS:-30}"
 for i in $(seq 1 "$WAIT_SECS"); do
     if compgen -G "/sys/class/pcan/pcanusbfd*" >/dev/null; then

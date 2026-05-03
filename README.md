@@ -36,57 +36,56 @@ pixi run teleop-unilateral left_arm  left_leader  left_follower   # left only
 
 ### Boot-time setup
 
-Two pieces:
+Build the PEAK driver once: download from <https://www.peak-system.com/quick/PCAN-Linux-Driver>, then `make netdev && sudo make install`. The Jetson L4T kernel disables `CONFIG_CAN_PEAK_USB`, so this out-of-tree build is required.
 
-1. **`pcan` kernel module — load on USB device appearance, not at boot.** The Jetson L4T kernel doesn't ship the PEAK driver, so it's built from source (rebuild from <https://www.peak-system.com/quick/PCAN-Linux-Driver> with `make netdev && sudo make install`).
+After that, install the systemd unit below. **Do NOT add `pcan` to `/etc/modules-load.d/` and do NOT add a boot-time udev rule for it.** The PEAK driver has a known kernel bug — `pcan_usb_plugin → canfd_set_bus_off → pcan_usbfd_send_ucan_cmd → usb_bulk_msg → wait_for_completion_timeout` invokes a sleeping function from atomic context (kernel emits `BUG: scheduling while atomic`). The wait completes eventually, but on slow USB enumeration it can stall for tens of seconds. If pcan loads early in boot, that stall happens on the critical path and can hang the boot indefinitely. The fix is to defer pcan loading until **after** `multi-user.target` so the stall (if any) sits in the background while the system is already up.
 
-   Don't add it to `/etc/modules-load.d/` — `pcan_init_module()` does synchronous USB I/O at modprobe time (calls `pcan_usb_plugin → canfd_set_bus_off → pcan_usbfd_send_ucan_cmd`), so loading it before USB has fully enumerated can race and hang `systemd-modules-load.service`, which then blocks the rest of boot. Use a udev rule instead — modprobe only runs after the USB device is visible:
+```bash
+# Make sure no early-loader is in place
+sudo rm -f /etc/modules-load.d/pcan.conf
+sudo rm -f /etc/udev/rules.d/70-pcan-modprobe.rules
+sudo udevadm control --reload-rules
 
-   ```bash
-   sudo rm -f /etc/modules-load.d/pcan.conf
+# Install the unit. After= multi-user.target keeps the modprobe stall off the
+# critical boot path; the script does the modprobe + rename + bring-up itself.
+sudo tee /etc/systemd/system/openarm-can.service >/dev/null <<EOF
+[Unit]
+Description=Load pcan + rename and configure DanBot CAN interfaces
+After=multi-user.target
 
-   sudo tee /etc/udev/rules.d/70-pcan-modprobe.rules >/dev/null <<'EOF'
-   # PEAK PCAN-USB Pro FD (0c72:0011) — load pcan after the USB device is enumerated
-   ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="0c72", ATTRS{idProduct}=="0011", RUN+="/sbin/modprobe pcan"
-   EOF
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=120
+ExecStart=/bin/bash $(pwd)/scripts/pixi/openarm_can_setup.sh
 
-   sudo udevadm control --reload-rules
-   ```
+[Install]
+WantedBy=multi-user.target
+EOF
 
-2. **CAN interface rename + bring-up.** A systemd oneshot unit calls `scripts/pixi/openarm_can_setup.sh` at multi-user.target. The script polls `/sys/class/pcan/pcanusbfd*/` for up to 30 s (giving the udev-triggered modprobe time to land), maps each channel to its stable name by USB port path + controller channel, renames `canN` via `ip link set canN name <role>`, then brings it up in CAN-FD mode.
+sudo systemctl daemon-reload
+sudo systemctl enable --now openarm-can.service
+```
 
-   ```bash
-   sudo tee /etc/systemd/system/openarm-can.service >/dev/null <<EOF
-   [Unit]
-   Description=Rename and configure DanBot PEAK CAN-FD interfaces
-   After=local-fs.target
+What `openarm_can_setup.sh` does, in order:
+1. `modprobe pcan` if it isn't already loaded (this is where the 5–30 s stall lives, off the boot critical path).
+2. Polls `/sys/class/pcan/pcanusbfd*/` for up to 30 s while USB enumeration settles.
+3. Reads each channel's `device` symlink and `ctrlr_number`, maps `(USB port, channel) → role` from the table at the top of the script, and renames each `canN` via `ip link set canN name <role>` to the stable name (`right_leader`, `left_leader`, `right_follower`, `left_follower`).
+4. Brings each renamed interface up in CAN-FD mode via `openarm-can-configure-socketcan`.
 
-   [Service]
-   Type=oneshot
-   RemainAfterExit=yes
-   # Script polls for /sys/class/pcan/pcanusbfd* up to 30s — give it room.
-   TimeoutStartSec=60
-   ExecStart=/bin/bash $(pwd)/scripts/pixi/openarm_can_setup.sh
+To re-run manually (after replugging adapters or editing the mapping):
+```bash
+sudo bash scripts/pixi/openarm_can_setup.sh
+```
 
-   [Install]
-   WantedBy=multi-user.target
-   EOF
+### Trade-off
 
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now openarm-can.service
-   ```
-
-   To re-run manually (after replugging adapters or editing the mapping):
-   ```bash
-   sudo bash scripts/pixi/openarm_can_setup.sh
-   ```
-
-   The mapping table is at the top of the script — adjust if you re-cable.
+CAN comes up a few seconds *after* the login prompt, instead of being available the moment the kernel finishes booting. If you run `pixi run danbot-teleop` in the brief window between login and the service finishing, you'll get `interface 'right_leader' not found` — wait a moment and re-run, or `systemctl status openarm-can.service` to watch its progress.
 
 ### Troubleshooting
 
-- **`pixi run danbot-teleop` says `interface 'right_leader' not found`** → the rename didn't run. Check `systemctl status openarm-can.service`, then `sudo bash scripts/pixi/openarm_can_setup.sh` to do it now.
-- **Boot got stuck for a long time / `systemctl status openarm-can.service` shows the prior boot had no entries** → almost certainly the pcan-loading-too-early race. Verify `/etc/modules-load.d/pcan.conf` is *gone* and `/etc/udev/rules.d/70-pcan-modprobe.rules` is in place per step 1 above. Also check that pcan does actually load: `lsusb | grep -i peak` after boot, then `lsmod | grep pcan` should be non-empty within ~5 s.
+- **`pixi run danbot-teleop` says `interface 'right_leader' not found`** → the rename didn't run yet (or failed). `systemctl status openarm-can.service` shows progress; `sudo bash scripts/pixi/openarm_can_setup.sh` runs it manually.
+- **Boot is stuck on a kernel call trace mentioning `pcan_init_module` and `__schedule_bug`** → pcan is being loaded too early. Confirm `/etc/modules-load.d/pcan.conf` is *gone* and `/etc/udev/rules.d/70-pcan-modprobe.rules` is *gone*. Check `lsmod | grep pcan` immediately after the login prompt — it should be empty until `openarm-can.service` runs and modprobes it.
 - **Diagnosis tool returns NG on every motor** → motors aren't electrically alive. Most likely an e-stop re-latched after a power cycle (they reset on boot and need to be physically released again). Confirm joint status LEDs are lit on every motor and all four e-stops are popped up, then `~/openarm_can/build/openarm-can-diagnosis right_leader -fd` to re-test.
 - **`tx N rx 0` / ERROR-PASSIVE / BUS-OFF on a bus that was previously fine** → most often a stray teleop process holding the socket open from a previous run: `pkill -9 -f unilateral_control` (and the other binaries) clears it. Then re-cycle the bus: `sudo ip link set <name> down && sudo openarm-can-configure-socketcan <name> -fd`.
 
