@@ -29,7 +29,21 @@ CONFIGURE_TOOL="${CONFIGURE_TOOL:-/usr/local/bin/openarm-can-configure-socketcan
 # "BUG: scheduling while atomic" and stalling for tens of seconds when USB
 # enumeration is slow. Doing the modprobe AFTER multi-user.target (where our
 # systemd unit fires) keeps the stall out of the critical boot path.
-if ! lsmod | grep -q '^pcan '; then
+if lsmod | grep -q '^pcan '; then
+    # If we're running from openarm-can.service at fresh boot, pcan should NOT
+    # already be loaded — the deferral relies on `blacklist pcan` in
+    # /etc/modprobe.d/ to suppress udev's modalias-driven autoload. If it's
+    # loaded anyway, the deferral is bypassed and the buggy probe is back on
+    # the boot-critical path. Harmless when this script is run manually after
+    # boot, so we warn rather than fail.
+    # Avoid `grep -q` here: it closes the pipe early, modprobe -c gets SIGPIPE
+    # (exit 141), and pipefail then propagates it as a "no match".
+    if ! modprobe -c 2>/dev/null | grep -Fx 'blacklist pcan' >/dev/null; then
+        echo "[openarm-can-setup] WARNING: pcan already loaded AND no 'blacklist pcan' in modprobe config." >&2
+        echo "[openarm-can-setup]   At boot this means udev autoloaded pcan via USB modalias, which" >&2
+        echo "[openarm-can-setup]   defeats the post-multi-user.target deferral. See README boot-time setup." >&2
+    fi
+else
     echo "[openarm-can-setup] modprobing pcan (this can take 5-30s due to driver bug)"
     modprobe pcan || {
         echo "[openarm-can-setup] modprobe pcan failed" >&2

@@ -38,13 +38,25 @@ pixi run teleop-unilateral left_arm  left_leader  left_follower   # left only
 
 Build the PEAK driver once: download from <https://www.peak-system.com/quick/PCAN-Linux-Driver>, then `make netdev && sudo make install`. The Jetson L4T kernel disables `CONFIG_CAN_PEAK_USB`, so this out-of-tree build is required.
 
-After that, install the systemd unit below. **Do NOT add `pcan` to `/etc/modules-load.d/` and do NOT add a boot-time udev rule for it.** The PEAK driver has a known kernel bug — `pcan_usb_plugin → canfd_set_bus_off → pcan_usbfd_send_ucan_cmd → usb_bulk_msg → wait_for_completion_timeout` invokes a sleeping function from atomic context (kernel emits `BUG: scheduling while atomic`). The wait completes eventually, but on slow USB enumeration it can stall for tens of seconds. If pcan loads early in boot, that stall happens on the critical path and can hang the boot indefinitely. The fix is to defer pcan loading until **after** `multi-user.target` so the stall (if any) sits in the background while the system is already up.
+After that, install the systemd unit below. The PEAK driver has a known kernel bug — `pcan_usb_plugin → canfd_set_bus_off → pcan_usbfd_send_ucan_cmd → usb_bulk_msg → wait_for_completion_timeout` invokes a sleeping function from atomic context (kernel emits `BUG: scheduling while atomic`). The wait completes eventually, but on slow USB enumeration it can stall for tens of seconds. If pcan loads early in boot, that stall happens on the critical path and can hang the boot indefinitely. The fix is to defer pcan loading until **after** `multi-user.target` so the stall (if any) sits in the background while the system is already up.
+
+To actually achieve that deferral, **all three** of the following must hold: no `pcan` entry in `/etc/modules-load.d/`, no boot-time udev rule that modprobes it, AND a `blacklist pcan` line in `/etc/modprobe.d/`. The blacklist is the non-obvious one — `pcan.ko` ships USB modaliases (`alias usb:v0C72p0011...`), so when the kernel enumerates the PEAK USB devices at boot, udev calls `modprobe usb:v0C72p0011...` on its own, which resolves to `pcan`. Without the blacklist, pcan gets autoloaded around 7 s of kernel time regardless of the systemd unit, and the unit's `modprobe` becomes a no-op. `blacklist` only blocks alias-driven autoload — the unit's explicit `modprobe pcan` still works.
 
 ```bash
 # Make sure no early-loader is in place
 sudo rm -f /etc/modules-load.d/pcan.conf
 sudo rm -f /etc/udev/rules.d/70-pcan-modprobe.rules
 sudo udevadm control --reload-rules
+
+# Block udev's auto-load via the pcan USB modaliases. The systemd unit below
+# still loads pcan explicitly post-multi-user.target.
+sudo tee /etc/modprobe.d/openarm-pcan-deferred.conf >/dev/null <<'EOF'
+# pcan_init_module → pcan_usb_plugin → canfd_set_bus_off has a known
+# "scheduling while atomic" kernel bug. Defer pcan to openarm-can.service
+# (post-multi-user.target) so any stall stays off the boot-critical path.
+# `blacklist` only blocks alias-driven autoload; explicit `modprobe pcan` works.
+blacklist pcan
+EOF
 
 # Install the unit. After= multi-user.target keeps the modprobe stall off the
 # critical boot path; the script does the modprobe + rename + bring-up itself.
@@ -85,7 +97,7 @@ CAN comes up a few seconds *after* the login prompt, instead of being available 
 ### Troubleshooting
 
 - **`pixi run danbot-teleop` says `interface 'right_leader' not found`** → the rename didn't run yet (or failed). `systemctl status openarm-can.service` shows progress; `sudo bash scripts/pixi/openarm_can_setup.sh` runs it manually.
-- **Boot is stuck on a kernel call trace mentioning `pcan_init_module` and `__schedule_bug`** → pcan is being loaded too early. Confirm `/etc/modules-load.d/pcan.conf` is *gone* and `/etc/udev/rules.d/70-pcan-modprobe.rules` is *gone*. Check `lsmod | grep pcan` immediately after the login prompt — it should be empty until `openarm-can.service` runs and modprobes it.
+- **Boot is stuck (or recovers via reboot) on a kernel call trace mentioning `pcan_init_module` and `__schedule_bug`** → pcan is being loaded too early. Confirm `/etc/modules-load.d/pcan.conf` and `/etc/udev/rules.d/70-pcan-modprobe.rules` are *gone*, AND that `/etc/modprobe.d/openarm-pcan-deferred.conf` exists and contains `blacklist pcan` (`modprobe -c | grep '^blacklist pcan$'` should match). Then `journalctl -b -k -o short-monotonic | grep pcan` should show pcan loading at the same monotonic time as `Starting openarm-can.service`, not at ~7 s. The setup script also warns at runtime if pcan was already loaded before it ran.
 - **Diagnosis tool returns NG on every motor** → motors aren't electrically alive. Most likely an e-stop re-latched after a power cycle (they reset on boot and need to be physically released again). Confirm joint status LEDs are lit on every motor and all four e-stops are popped up, then `~/openarm_can/build/openarm-can-diagnosis right_leader -fd` to re-test.
 - **`tx N rx 0` / ERROR-PASSIVE / BUS-OFF on a bus that was previously fine** → most often a stray teleop process holding the socket open from a previous run: `pkill -9 -f unilateral_control` (and the other binaries) clears it. Then re-cycle the bus: `sudo ip link set <name> down && sudo openarm-can-configure-socketcan <name> -fd`.
 
