@@ -11,11 +11,17 @@
 set -uo pipefail
 
 # USB-port:channel  →  desired interface name
+#
+# The two PEAK adapters on this rig happen to have OPPOSITE channel→side
+# wiring conventions: on the leader adapter (1-4.1) channel 0 is the right
+# arm, but on the follower adapter (1-4.2) channel 0 is the left arm.
+# Verified empirically with `./build/comm_test <iface>` — whichever physical
+# arm lights up is the correct mapping. If you re-cable, re-verify both sides.
 declare -A MAPPING=(
     ["1-4.1:0"]="right_leader"
     ["1-4.1:1"]="left_leader"
-    ["1-4.2:0"]="right_follower"
-    ["1-4.2:1"]="left_follower"
+    ["1-4.2:0"]="left_follower"
+    ["1-4.2:1"]="right_follower"
 )
 # NOTE: Linux interface names must be <= 15 chars (IFNAMSIZ-1).
 # right_follower (14) is the longest currently. Stay under 15 if you edit.
