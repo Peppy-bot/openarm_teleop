@@ -101,6 +101,23 @@ CAN comes up a few seconds *after* the login prompt, instead of being available 
 - **Diagnosis tool returns NG on every motor** → motors aren't electrically alive. Most likely an e-stop re-latched after a power cycle (they reset on boot and need to be physically released again). Confirm joint status LEDs are lit on every motor and all four e-stops are popped up, then `~/openarm_can/build/openarm-can-diagnosis right_leader -fd` to re-test.
 - **`tx N rx 0` / ERROR-PASSIVE / BUS-OFF on a bus that was previously fine** → most often a stray teleop process holding the socket open from a previous run: `pkill -9 -f unilateral_control` (and the other binaries) clears it. Then re-cycle the bus: `sudo ip link set <name> down && sudo openarm-can-configure-socketcan <name> -fd`.
 
+## RealSense cameras
+
+DanBot has three Intel RealSense cameras (1× D435 scene + 2× D405 wrist) hanging off the Jetson's USB 3 hub. Since the Jetson is headless, `realsense-viewer` (Qt GUI) isn't useful — instead, `pixi run realsense-viewer` starts a small MJPEG HTTP server that streams color + colorized depth from each camera. Open `http://<jetson-host>:8080/` in any browser.
+
+```bash
+pixi run realsense-viewer                                    # all connected cameras, 640x480@30
+pixi run realsense-viewer -- --serial 334122073890           # one specific camera
+pixi run realsense-viewer -- --width 1280 --height 720       # higher resolution
+pixi run realsense-viewer -- --port 9000                     # change port
+```
+
+The `--` separator is required to pass flags through pixi to the underlying script.
+
+**USB bandwidth caveat:** each camera at `1280x720@30` (color BGR8 + depth Z16) consumes ~133 MB/s. Three cameras on a single USB 3 hub at 720p exceed the ~350 MB/s practical bus throughput; the kernel will mid-stream-reset devices and pipelines hang. The default `640x480@30` fits all three comfortably. Use `1280x720` only when streaming one or two cameras.
+
+Firmware is pinned at **5.17.0.10** across all three cameras (the recommended FW for librealsense 2.5x). To re-flash after replacing a camera, download `D4XX_FW_Image-5.17.0.10.bin` from `librealsense.realsenseai.com/Releases/RS4xx/FW/` and run `rs-fw-update -s <serial> -b backup-<serial>.bin -f D4XX_FW_Image-5.17.0.10.bin` (don't unplug during the ~30 s flash).
+
 ## All pixi tasks
 
 | Task | What it does |
@@ -109,6 +126,7 @@ CAN comes up a few seconds *after* the login prompt, instead of being available 
 | `pixi run teleop-unilateral <arm_side> [leader_can] [follower_can]` | Single-arm unilateral teleop. |
 | `pixi run teleop-bilateral <arm_side> [leader_can] [follower_can]` | Single-arm bilateral teleop (force-feedback to leader). |
 | `pixi run teleop-grav-comp <arm_side> [can_if] [arm_type]` | Gravity compensation only (no follower). |
+| `pixi run realsense-viewer [-- --serial SN]... [-- --port N]` | Headless MJPEG viewer for connected RealSense cameras at `http://<host>:8080/`. |
 | `pixi run setup-ws` | Clones `openarm_description` + `openarm_can` into `ros2_ws/src/` and colcon-builds them. |
 | `pixi run build` | CMake-builds the teleop binaries into `./build/`. |
 
@@ -118,7 +136,7 @@ To force a rebuild: `rm -rf build/` (cmake) or `rm -rf ros2_ws/install/` (colcon
 
 - `pixi.toml` — env definition + tasks (channels: `robostack-staging`, `conda-forge`)
 - `activate.sh` — sources the colcon overlay on env activation
-- `scripts/pixi/setup_ws.sh`, `scripts/pixi/build.sh`, `scripts/pixi/danbot_teleop.sh` — the underlying task scripts
+- `scripts/pixi/setup_ws.sh`, `scripts/pixi/build.sh`, `scripts/pixi/danbot_teleop.sh`, `scripts/pixi/realsense_viewer.py` — the underlying task scripts
 - `script/launch_*.sh` — the upstream launch scripts (`WS_DIR`/`BIN_PATH` rewritten as script-relative paths so the repo is portable; `WS_DIR` is still overridable via env var)
 - `ros2_ws/` — vendored ROS 2 workspace (gitignored; populated by `setup-ws`)
 
