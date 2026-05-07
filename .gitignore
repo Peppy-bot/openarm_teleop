@@ -19,6 +19,7 @@ ament_cmake_core/
 build.ninja
 cmake_install.cmake
 CMakeFiles/
+__pycache__
 
 # pixi
 .pixi/

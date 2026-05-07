@@ -91,5 +91,5 @@ cmd = "bash scripts/pixi/danbot_teleop.sh"
 depends-on = ["build"]
 
 [tasks.realsense-viewer]
-description = "Headless MJPEG viewer for RealSense cameras. Open http://<host>:8080/. Args: [--serial SN]... [--port N] [--width N] [--height N] [--fps N]"
+description = "Headless MJPEG viewer for RealSense + UVC cameras. Auto-detects RealSense via librealsense and non-Intel UVC via /dev/v4l/by-id. Open http://<host>:8080/. Extra args: [--serial SN]... [--uvc /dev/videoN]... [--port N] [--width N] [--height N] [--fps N]"
 cmd = "python scripts/pixi/realsense_viewer.py"
