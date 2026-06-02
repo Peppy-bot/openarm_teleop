@@ -33,8 +33,9 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-# Stable interface names, set up by scripts/pixi/openarm_can_setup.sh
-# (called from the openarm-can.service systemd unit at boot).
+# Stable interface names, applied automatically by the udev rule
+# /etc/udev/rules.d/80-openarm-can.rules whenever the PEAK adapters appear.
+# scripts/pixi/openarm_can_setup.sh is a manual fallback that does the same.
 RIGHT_LEADER="right_leader"
 RIGHT_FOLLOWER="right_follower"
 LEFT_LEADER="left_leader"
@@ -43,7 +44,7 @@ LEFT_FOLLOWER="left_follower"
 for iface in "$RIGHT_LEADER" "$RIGHT_FOLLOWER" "$LEFT_LEADER" "$LEFT_FOLLOWER"; do
     if ! ip link show "$iface" >/dev/null 2>&1; then
         echo "[danbot-teleop] interface '$iface' not found" >&2
-        echo "  Did the openarm-can.service run? Check: systemctl status openarm-can.service" >&2
+        echo "  The udev rule should bring these up on plug-in. Check: ip -br link show type can" >&2
         echo "  Or run manually: sudo bash $REPO_DIR/scripts/pixi/openarm_can_setup.sh" >&2
         exit 1
     fi

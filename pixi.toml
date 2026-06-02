@@ -33,6 +33,7 @@ git = "*"
 eigen = "*"
 yaml-cpp = "*"
 urdfdom = "*"
+cli11 = "*"
 
 # Headless RealSense viewer (scripts/pixi/realsense_viewer.py)
 pyrealsense2 = "*"

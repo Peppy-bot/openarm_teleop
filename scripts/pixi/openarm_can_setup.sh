@@ -2,102 +2,80 @@
 # Renames the four PEAK PCAN-USB Pro FD channels to stable names based on
 # their USB port path + controller channel, then brings them up in CAN-FD mode.
 #
-# Why: `pcan` and `mttcan` race for the canN namespace at boot, so the kernel
-# numbering of PEAK channels (can0..can3 vs can4..can7) is not stable across
-# reboots. PEAK ships these adapters with identical default `serialno`, so the
-# only stable per-adapter key is the USB port path on the Jetson carrier.
+# Driver: this rig (Raspberry Pi, 6.8.x-raspi kernel) uses the IN-KERNEL
+# `peak_usb` SocketCAN driver, NOT PEAK's proprietary `pcan` chardev driver.
+# pcan is not built for this kernel and would fight peak_usb for the adapters.
+# peak_usb auto-loads on USB enumeration and exposes each CAN channel as a
+# canN netdev, so there is NO modprobe step on the critical path.
+#
+# Stable naming: PEAK ships these adapters with identical default serialno, so
+# the only stable per-adapter key is the USB port path. Within an adapter, the
+# peak_usb channel index is exposed as /sys/class/net/<if>/dev_id (0 or 1).
 #
 # Adjust MAPPING below if the adapters get re-cabled to different ports.
 set -uo pipefail
 
-# USB-port:channel  →  desired interface name
+# USB-port:channel(dev_id)  →  desired interface name
 #
-# The two PEAK adapters on this rig happen to have OPPOSITE channel→side
-# wiring conventions: on the leader adapter (1-4.1) channel 0 is the right
-# arm, but on the follower adapter (1-4.2) channel 0 is the left arm.
-# Verified empirically with `./build/comm_test <iface>` — whichever physical
-# arm lights up is the correct mapping. If you re-cable, re-verify both sides.
+# Channel→side direction is VERIFIED EMPIRICALLY with `./build/comm_test <iface>`
+# (whichever physical arm responds is that interface). The two adapters may use
+# opposite channel→side conventions, so re-verify BOTH sides after any
+# re-cabling. On this Pi the two Pro FD adapters enumerate as USB ports
+# 2-1.2 and 2-1.3 (was 1-4.1 / 1-4.2 on the old Jetson rig).
 declare -A MAPPING=(
-    ["1-4.1:0"]="right_leader"
-    ["1-4.1:1"]="left_leader"
-    ["1-4.2:0"]="left_follower"
-    ["1-4.2:1"]="right_follower"
+    ["2-1.2:0"]="right_leader"
+    ["2-1.2:1"]="left_leader"
+    ["2-1.3:0"]="left_follower"
+    ["2-1.3:1"]="right_follower"
 )
 # NOTE: Linux interface names must be <= 15 chars (IFNAMSIZ-1).
 # right_follower (14) is the longest currently. Stay under 15 if you edit.
 
-CONFIGURE_TOOL="${CONFIGURE_TOOL:-/usr/local/bin/openarm-can-configure-socketcan}"
+BITRATE="${BITRATE:-1000000}"
+DBITRATE="${DBITRATE:-5000000}"
 
-# Load pcan ourselves if it's not already loaded. We deliberately do this here
-# (and NOT via /etc/modules-load.d/ or a boot-time udev rule) because pcan's
-# init code has a known kernel bug: it calls usb_bulk_msg from atomic context
-# during pcan_usb_plugin → canfd_set_bus_off, producing
-# "BUG: scheduling while atomic" and stalling for tens of seconds when USB
-# enumeration is slow. Doing the modprobe AFTER multi-user.target (where our
-# systemd unit fires) keeps the stall out of the critical boot path.
-if lsmod | grep -q '^pcan '; then
-    # If we're running from openarm-can.service at fresh boot, pcan should NOT
-    # already be loaded — the deferral relies on `blacklist pcan` in
-    # /etc/modprobe.d/ to suppress udev's modalias-driven autoload. If it's
-    # loaded anyway, the deferral is bypassed and the buggy probe is back on
-    # the boot-critical path. Harmless when this script is run manually after
-    # boot, so we warn rather than fail.
-    # Avoid `grep -q` here: it closes the pipe early, modprobe -c gets SIGPIPE
-    # (exit 141), and pipefail then propagates it as a "no match".
-    if ! modprobe -c 2>/dev/null | grep -Fx 'blacklist pcan' >/dev/null; then
-        echo "[openarm-can-setup] WARNING: pcan already loaded AND no 'blacklist pcan' in modprobe config." >&2
-        echo "[openarm-can-setup]   At boot this means udev autoloaded pcan via USB modalias, which" >&2
-        echo "[openarm-can-setup]   defeats the post-multi-user.target deferral. See README boot-time setup." >&2
-    fi
-else
-    echo "[openarm-can-setup] modprobing pcan (this can take 5-30s due to driver bug)"
-    modprobe pcan || {
-        echo "[openarm-can-setup] modprobe pcan failed" >&2
+# peak_usb is in-kernel and normally auto-loaded by udev when the adapters are
+# plugged in. Load it ourselves only if it somehow isn't present yet.
+if ! lsmod | grep -q '^peak_usb'; then
+    echo "[openarm-can-setup] loading peak_usb"
+    modprobe peak_usb || {
+        echo "[openarm-can-setup] modprobe peak_usb failed" >&2
         exit 1
     }
 fi
 
-# Wait up to N seconds for the pcan module to register sysfs entries
-# (USB enumeration may still be settling).
-WAIT_SECS="${WAIT_SECS:-30}"
-for i in $(seq 1 "$WAIT_SECS"); do
-    if compgen -G "/sys/class/pcan/pcanusbfd*" >/dev/null; then
-        break
-    fi
-    if [ "$i" -eq "$WAIT_SECS" ]; then
-        echo "[openarm-can-setup] timed out waiting for /sys/class/pcan/pcanusbfd* (${WAIT_SECS}s)" >&2
-        echo "  Check: lsmod | grep pcan; lsusb | grep -i peak" >&2
-        exit 1
-    fi
-    sleep 1
-done
-
 declare -a stable_names=()
 declare -a unmapped=()
+found=0
 
-for d in /sys/class/pcan/pcanusbfd*/; do
-    [ -d "$d" ] || continue
+# Walk every netdev backed by the peak_usb driver and key it by USB port path
+# + channel index (dev_id). This survives renames, so the script is idempotent.
+for ifpath in /sys/class/net/*; do
+    [ -e "$ifpath/device/driver" ] || continue
+    drv=$(basename "$(readlink -f "$ifpath/device/driver")")
+    [ "$drv" = "peak_usb" ] || continue
+    found=1
 
-    cur=$(cat "$d/ndev" 2>/dev/null)
-    ctrlr=$(cat "$d/ctrlr_number" 2>/dev/null)
-    devlink=$(readlink -f "$d/device" 2>/dev/null)
-    [ -n "$cur" ] && [ -n "$ctrlr" ] && [ -n "$devlink" ] || continue
-
-    # .../usb1/1-4/1-4.1/1-4.1:1.0  →  1-4.1
+    cur=$(basename "$ifpath")
+    devlink=$(readlink -f "$ifpath/device")
+    # .../usb2/2-1/2-1.2/2-1.2:1.0  →  2-1.2
     port=$(basename "$(dirname "$devlink")")
+    chan=$(cat "$ifpath/dev_id" 2>/dev/null)
+    # dev_id is reported as hex (e.g. 0x1); normalize to decimal.
+    chan=$((chan))
 
-    key="${port}:${ctrlr}"
+    key="${port}:${chan}"
     target="${MAPPING[$key]:-}"
 
     if [ -z "$target" ]; then
-        unmapped+=("$cur (USB $port channel $ctrlr)")
+        unmapped+=("$cur (USB $port channel $chan)")
         continue
     fi
 
     if [ "$cur" = "$target" ]; then
         echo "[openarm-can-setup] $cur already named correctly"
     else
-        echo "[openarm-can-setup] renaming $cur → $target  (USB $port channel $ctrlr)"
+        echo "[openarm-can-setup] renaming $cur → $target  (USB $port channel $chan)"
         ip link set "$cur" down 2>/dev/null || true
         if ! ip link set "$cur" name "$target"; then
             echo "[openarm-can-setup]  rename failed (target may already exist); leaving as $cur" >&2
@@ -108,20 +86,25 @@ for d in /sys/class/pcan/pcanusbfd*/; do
     stable_names+=("$target")
 done
 
-if [ "${#stable_names[@]}" -eq 0 ]; then
-    echo "[openarm-can-setup] no PEAK PCAN interfaces found — is the pcan module loaded?" >&2
+if [ "$found" -eq 0 ]; then
+    echo "[openarm-can-setup] no peak_usb CAN interfaces found — is the adapter plugged in?" >&2
+    echo "  Check: lsusb | grep -i peak; ip -br link show type can" >&2
     exit 1
 fi
 
 if [ "${#unmapped[@]}" -gt 0 ]; then
-    echo "[openarm-can-setup] WARNING: unmapped PCAN channels (left as-is):" >&2
+    echo "[openarm-can-setup] WARNING: unmapped peak_usb channels (left as-is):" >&2
     printf '  - %s\n' "${unmapped[@]}" >&2
 fi
 
-# Configure each renamed interface in CAN-FD mode.
+# Configure each renamed interface in CAN-FD mode (down → set params → up).
 rc=0
 for name in "${stable_names[@]}"; do
-    if ! "$CONFIGURE_TOOL" "$name" -fd; then
+    ip link set "$name" down 2>/dev/null || true
+    if ip link set "$name" type can bitrate "$BITRATE" dbitrate "$DBITRATE" fd on \
+        && ip link set "$name" up; then
+        echo "[openarm-can-setup] $name up (CAN-FD ${BITRATE}/${DBITRATE})"
+    else
         echo "[openarm-can-setup] $name configure failed" >&2
         rc=1
     fi

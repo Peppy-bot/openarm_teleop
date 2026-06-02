@@ -20,11 +20,22 @@ CAN_IF=${2:-can0}
 ARM_TYPE=${3:-v10}
 TMPDIR="/tmp/openarm_urdf_gen"
 URDF_NAME="${ARM_TYPE}_bimanual.urdf"
-XACRO_FILE="${ARM_TYPE}.urdf.xacro"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WS_DIR="${WS_DIR:-$REPO_DIR/ros2_ws}"
-XACRO_PATH="$WS_DIR/src/openarm_description/urdf/robot/$XACRO_FILE"
+# openarm_description was restructured into a multi-version `assets/` tree
+# (urdf/robot/v10.urdf.xacro -> assets/robot/openarm_v1.0/urdf/openarm_v10.urdf.xacro).
+# Prefer the new layout and fall back to the legacy flat one so either checkout
+# of openarm_description keeps working. ARM_TYPE "v10" maps to openarm_v1.0.
+DESC_DIR="$WS_DIR/src/openarm_description"
+XACRO_CANDIDATES=(
+    "$DESC_DIR/assets/robot/openarm_v1.0/urdf/openarm_${ARM_TYPE}.urdf.xacro"
+    "$DESC_DIR/urdf/robot/${ARM_TYPE}.urdf.xacro"
+)
+XACRO_PATH=""
+for _cand in "${XACRO_CANDIDATES[@]}"; do
+    [ -f "$_cand" ] && { XACRO_PATH="$_cand"; break; }
+done
 URDF_OUT="$TMPDIR/$URDF_NAME"
 BIN_PATH="$REPO_DIR/build/gravity_comp"
 # ===============================
@@ -44,8 +55,10 @@ if [ ! -d "$WS_DIR/src/openarm_description" ]; then
 fi
 
 # Check xacro
-if [ ! -f "$XACRO_PATH" ]; then
-    echo "[ERROR] Could not find ${XACRO_FILE} under $WS_DIR/src/openarm_description/urdf/robot/" >&2
+if [ -z "$XACRO_PATH" ]; then
+    echo "[ERROR] Could not find the ${ARM_TYPE} robot xacro in openarm_description." >&2
+    echo "        Looked in:" >&2
+    for _cand in "${XACRO_CANDIDATES[@]}"; do echo "          - $_cand" >&2; done
     exit 1
 fi
 

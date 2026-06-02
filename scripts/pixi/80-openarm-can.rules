@@ -1,0 +1,23 @@
+# OpenArm PEAK PCAN-USB Pro FD stable interface naming (in-kernel peak_usb driver).
+#
+# Applied automatically whenever a peak_usb CAN channel appears (boot, replug,
+# USB reset), so the stable names survive reboots and re-enumeration without
+# any manual step.
+#
+# IMPORTANT — naming is by USB PORT, not by adapter. The two Pro FD adapters are
+# electrically identical (no USB serial number, and their programmable
+# can_channel_id is unset + read-only on this kernel), so the only key that
+# tells them apart is the USB port each is plugged into, plus the controller
+# channel (dev_id 0/1). If you move an adapter to a different port, the names
+# follow the PORT — re-verify with ./build/comm_test and update KERNELS== below.
+#
+# Channel→side mapping must be verified empirically (comm_test): whichever
+# physical arm responds on an interface is that interface.
+
+# --- Adapter on USB port 2-1.2 ---
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="peak_usb", KERNELS=="2-1.2:1.0", ATTR{dev_id}=="0x0", NAME="right_leader", RUN+="/usr/sbin/ip link set right_leader type can bitrate 1000000 dbitrate 5000000 fd on", RUN+="/usr/sbin/ip link set right_leader up"
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="peak_usb", KERNELS=="2-1.2:1.0", ATTR{dev_id}=="0x1", NAME="left_leader",  RUN+="/usr/sbin/ip link set left_leader type can bitrate 1000000 dbitrate 5000000 fd on",  RUN+="/usr/sbin/ip link set left_leader up"
+
+# --- Adapter on USB port 2-1.3 ---
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="peak_usb", KERNELS=="2-1.3:1.0", ATTR{dev_id}=="0x0", NAME="left_follower",  RUN+="/usr/sbin/ip link set left_follower type can bitrate 1000000 dbitrate 5000000 fd on",  RUN+="/usr/sbin/ip link set left_follower up"
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="peak_usb", KERNELS=="2-1.3:1.0", ATTR{dev_id}=="0x1", NAME="right_follower", RUN+="/usr/sbin/ip link set right_follower type can bitrate 1000000 dbitrate 5000000 fd on", RUN+="/usr/sbin/ip link set right_follower up"
